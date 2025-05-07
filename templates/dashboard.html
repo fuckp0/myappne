@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instagram CRM Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <nav class="col-md-3 col-lg-2 d-md-block bg-dark sidebar">
+                <div class="position-sticky pt-3">
+                    <h4 class="text-white text-center">Instagram CRM</h4>
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link text-white active" href="{{ url_for('dashboard') }}">Dashboard</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link text-white" href="{{ url_for('add_account') }}">Add Account</a>
+                        </li>
+                        {% if session.role == 'admin' %}
+                        <li class="nav-item">
+                            <a class="nav-link text-white" href="{{ url_for('admin_users') }}">Manage Users</a>
+                        </li>
+                        {% endif %}
+                        <li class="nav-item">
+                            <a class="nav-link text-white" href="{{ url_for('logout') }}">Logout</a>
+                        </li>
+                    </ul>
+                </div>
+            </nav>
+
+            <!-- Main Content -->
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2">Dashboard</h1>
+                </div>
+
+                <!-- Flash Messages -->
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {% endfor %}
+                {% endif %}
+                {% endwith %}
+
+                <!-- Account Selection -->
+                <div class="mb-4">
+                    <h4>All Accounts</h4>
+                    <ul class="list-group">
+                        {% for account in accounts %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            {{ account[0] }}
+                            {% if account[1] %}
+                            <span class="badge bg-danger">Re-auth needed</span>
+                            {% endif %}
+                        </li>
+                        {% endfor %}
+                        {% if not accounts %}
+                        <li class="list-group-item">No accounts added yet.</li>
+                        {% endif %}
+                    </ul>
+                </div>
+
+                <!-- Plan and Credits -->
+                <div class="mb-4">
+                    <h4>Your Plan</h4>
+                    <p><strong>Plan:</strong> {{ plan if plan else 'No plan assigned' }}</p>
+                    <p><strong>Available Credits:</strong> {{ credits }}</p>
+                </div>
+
+                <!-- Send DMs -->
+                <div class="mb-4">
+                    <h4>Send DMs</h4>
+                    <form method="POST" action="{{ url_for('send_dms') }}" enctype="multipart/form-data">
+                        <div class="mb-3">
+                            <label for="account" class="form-label">Select Account</label>
+                            <select class="form-select" id="account" name="account" required>
+                                <option value="">Select an account</option>
+                                {% for account in accounts %}
+                                <option value="{{ account[0] }}">{{ account[0] }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="usernames" class="form-label">Upload Usernames (.txt file, one username per line)</label>
+                            <input type="file" class="form-control" id="usernames" name="usernames" accept=".txt" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="messages" class="form-label">Upload Initial Message (.txt or JSON file, one message to send initially on any reply)</label>
+                            <input type="file" class="form-control" id="messages" name="messages" accept=".txt,.json" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="followup_messages" class="form-label">Upload Follow-Up Messages (.txt or JSON file, up to 5 messages for sequential replies)</label>
+                            <input type="file" class="form-control" id="followup_messages" name="followup_messages" accept=".txt,.json" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="num_messages" class="form-label">Number of Messages to Use (1-10)</label>
+                            <input type="number" class="form-control" id="num_messages" name="num_messages" min="1" max="10" value="1" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Send DMs</button>
+                    </form>
+                </div>
+
+                <!-- Recent Logs -->
+                <div class="mb-4">
+                    <h4>Recent Logs (Last 10 Entries)</h4>
+                    {% if log_entries %}
+                    <ul class="list-group">
+                        {% for log in log_entries %}
+                        <li class="list-group-item">{{ log.strip() }}</li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                    <p>No logs available.</p>
+                    {% endif %}
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
