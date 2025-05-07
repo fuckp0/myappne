@@ -437,11 +437,13 @@ def logout():
     flash("You have been logged out.", "success")
     return redirect(url_for('login'))
 
+
 @app.route('/admin/users', methods=['GET', 'POST'])
 @admin_required
 def admin_users():
     conn = db_pool
     c = conn.cursor()
+    
     if request.method == 'POST':
         action = request.form.get('action')
         if action == 'create':
@@ -478,8 +480,11 @@ def admin_users():
                 flash(f"Plan {plan} assigned to user ID {user_id}.", "success")
             else:
                 flash("Invalid plan selected.", "danger")
-        c.execute('SELECT id, username, role, credits, plan FROM users')
-        users = c.fetchall()
+
+    # Fetch users regardless of GET or POST
+    c.execute('SELECT id, username, role, credits, plan FROM users')
+    users = c.fetchall()
+
     return render_template('admin_users.html', users=users)
 
 @app.route('/add-account', methods=['GET', 'POST'])
