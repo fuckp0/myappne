@@ -5,8 +5,8 @@ import secrets
 import json
 from threading import Thread
 from instagrapi import Client
-from instagrapi.exceptions import ClientError, TwoFactorRequired, LoginRequired, ChallengeRequired
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+from instagrapi.exceptions import ClientError, LoginRequired
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from datetime import datetime
 import logging
 import bcrypt
@@ -16,9 +16,15 @@ import random
 import re
 import tenacity
 from sqlite3 import dbapi2 as sqlite
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # Code version for debugging
-CODE_VERSION = "3.1.0"
+CODE_VERSION = "3.2.0"  # Updated version for headed Selenium with challenge support
 
 # Load environment variables
 load_dotenv()
@@ -32,7 +38,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logging.info(f"Starting aa.py version {CODE_VERSION}")
+logging.info(f"Starting app.py version {CODE_VERSION}")
 
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(32))
@@ -163,6 +169,24 @@ def init_db():
         logging.error(f"Database initialization failed: {str(e)}")
         raise
 
+def setup_selenium_driver(proxy_settings=None):
+    chrome_options = Options()
+    # Headed mode for visibility and manual interaction
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-gpu')
+    if proxy_settings and proxy_settings.get('proxy'):
+        proxy_url = proxy_settings['proxy'].replace('socks5://', '')
+        chrome_options.add_argument(f'--proxy-server={proxy_url}')
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.set_window_size(1280, 800)  # Set a reasonable window size for visibility
+        logging.info(f"Selenium WebDriver initialized in headed mode with proxy: {proxy_settings}")
+        return driver
+    except WebDriverException as e:
+        logging.error(f"Failed to initialize Selenium WebDriver: {str(e)}")
+        raise
+
 def load_instagrapi_client(session_file):
     try:
         if not os.path.exists(session_file):
@@ -226,10 +250,8 @@ def normalize_message(message):
     return re.sub(r'[^\w\s]', '', message.lower()).strip()
 
 def is_contact_info(message):
-    # Basic phone number regex (e.g., +1234567890, 123-456-7890, (123) 456-7890)
     phone_pattern = r'(\+\d{10,15}|\(\d{3}\)\s*\d{3}-\d{4}|\d{3}-\d{3}-\d{4})'
-    # Basic email regex
-    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    email_pattern = r'[a-zA-Z0.9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     return bool(re.search(phone_pattern, message) or re.search(email_pattern, message))
 
 def clean_response(response):
@@ -315,7 +337,6 @@ def auto_respond():
                         if contact_name not in initial_usernames:
                             logging.debug(f"Thread {thread.id} with {contact_name} not in initial_dms, skipping")
                             continue
-                        # Check thread cooldown
                         c.execute('SELECT MAX(timestamp) FROM dms WHERE thread_id = ? AND account_id = (SELECT id FROM accounts WHERE user_id = ? AND username = ?)',
                                   (thread.id, user_id, username))
                         last_response_timestamp = c.fetchone()[0] or 0
@@ -323,7 +344,6 @@ def auto_respond():
                         if last_response_timestamp and (current_time - last_response_timestamp) < THREAD_COOLDOWN:
                             logging.debug(f"Thread {thread.id} with {contact_name} is in cooldown (last response at {last_response_timestamp}), skipping")
                             continue
-                        # Check if waiting for contact info
                         c.execute('SELECT waiting_for_contact FROM dms WHERE thread_id = ? AND account_id = (SELECT id FROM accounts WHERE user_id = ? AND username = ?) ORDER BY timestamp DESC LIMIT 1',
                                   (thread.id, user_id, username))
                         waiting = c.fetchone()
@@ -354,7 +374,6 @@ def auto_respond():
                                     logging.debug(f"Thread {thread.id} is waiting for contact info, skipping message {message_id}: '{last_message}'")
                                     continue
                                 response = huggingface_chatbot(last_message)
-                                # Check recent responses for repetition
                                 c.execute('SELECT last_response FROM dms WHERE thread_id = ? AND account_id = (SELECT id FROM accounts WHERE user_id = ? AND username = ?) ORDER BY timestamp DESC LIMIT 5',
                                           (thread.id, user_id, username))
                                 recent_responses = {row[0] for row in c.fetchall() if row[0]}
@@ -372,7 +391,6 @@ def auto_respond():
                                 except Exception as e:
                                     logging.error(f"Failed to send chatbot response to {contact_name} (thread {thread.id}, message {message_id}): {str(e)}")
                                     raise
-                    # Batch insert pending DMs
                     if pending_inserts:
                         try:
                             c.executemany(
@@ -437,7 +455,6 @@ def logout():
     flash("You have been logged out.", "success")
     return redirect(url_for('login'))
 
-
 @app.route('/admin/users', methods=['GET', 'POST'])
 @admin_required
 def admin_users():
@@ -481,7 +498,6 @@ def admin_users():
             else:
                 flash("Invalid plan selected.", "danger")
 
-    # Fetch users regardless of GET or POST
     c.execute('SELECT id, username, role, credits, plan FROM users')
     users = c.fetchall()
 
@@ -494,18 +510,18 @@ def add_account():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        two_factor_code = request.form.get('two_factor_code', '')
         proxy_host = request.form.get('proxy_host')
         proxy_port = request.form.get('proxy_port')
         proxy_username = request.form.get('proxy_username')
         proxy_password = request.form.get('proxy_password')
+        
         if not username or not password:
-            flash("Username and password are required.", "danger")
-            return render_template('add_account.html', two_factor_required=False)
+            return jsonify({'success': False, 'message': "Username and password are required."}), 400
+
         user_info = get_user_info(user_id)
         if not user_info:
-            flash("User not found.", "danger")
-            return render_template('add_account.html', two_factor_required=False)
+            return jsonify({'success': False, 'message': "User not found."}), 404
+
         plan, credits = user_info
         plan_configs = {
             'plan1': {'max_accounts': 5, 'credits_per_account': 20, 'credits_per_dm': 1},
@@ -513,19 +529,19 @@ def add_account():
             'plan3': {'max_accounts': 15, 'credits_per_account': 34, 'credits_per_dm': 1}
         }
         if not plan or plan not in plan_configs:
-            flash("You must have an active plan to add accounts.", "danger")
-            return render_template('add_account.html', two_factor_required=False)
+            return jsonify({'success': False, 'message': "You must have an active plan to add accounts."}), 403
+
         conn = db_pool
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM accounts WHERE user_id = ?', (user_id,))
         current_accounts = c.fetchone()[0]
         if current_accounts >= plan_configs[plan]['max_accounts']:
-            flash(f"You have reached the maximum number of accounts ({plan_configs[plan]['max_accounts']}) for your plan.", "danger")
-            return render_template('add_account.html', two_factor_required=False)
+            return jsonify({'success': False, 'message': f"You have reached the maximum number of accounts ({plan_configs[plan]['max_accounts']}) for your plan."}), 403
+
         credits_needed = plan_configs[plan]['credits_per_account']
         if credits < credits_needed:
-            flash(f"Insufficient credits. You need {credits_needed} credits to add an account, but you have {credits}.", "danger")
-            return render_template('add_account.html', two_factor_required=False)
+            return jsonify({'success': False, 'message': f"Insufficient credits. You need {credits_needed} credits to add an account, but you have {credits}."}), 403
+
         # Configure proxy
         proxy_settings = None
         if proxy_host and proxy_port:
@@ -534,43 +550,129 @@ def add_account():
                 proxy_url = f"socks5://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}"
             proxy_settings = {"proxy": proxy_url}
             logging.info(f"Using proxy for {username}: {proxy_url}")
-        session_file = f'session_{user_id}_{username}.json'
+
+        session_dir = f"sessions/{user_id}"
+        os.makedirs(session_dir, exist_ok=True)
+        session_file = f"{session_dir}/session_{username}.json"
+
         try:
-            cl = None
-            if os.path.exists(session_file):
-                cl = load_instagrapi_client(session_file)
-                if cl:
-                    try:
-                        cl.user_info(cl.user_id)
-                        logging.info(f"Reused existing session for {username} (user_id {user_id})")
-                    except (LoginRequired, ClientError) as e:
-                        logging.warning(f"Existing session invalid for {username} (user_id {user_id}): {str(e)}")
-                        cl = None
-                        os.remove(session_file)
-            if not cl:
-                cl = Client(request_timeout=15, proxy=proxy_settings["proxy"] if proxy_settings else None)
-                time.sleep(2)
+            # Initialize Selenium WebDriver in headed mode
+            driver = setup_selenium_driver(proxy_settings)
+            driver.get('https://www.instagram.com/accounts/login/')
+            
+            # Step 1: Enter credentials
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, 'username'))
+                )
+                driver.find_element(By.NAME, 'username').send_keys(username)
+                driver.find_element(By.NAME, 'password').send_keys(password)
+                driver.find_element(By.XPATH, '//button[@type="submit"]').click()
+                logging.info(f"Submitted login credentials for {username} (user_id {user_id})")
+            except TimeoutException:
+                driver.quit()
+                logging.error(f"Login page elements not found for {username} (user_id {user_id})")
+                return jsonify({'success': False, 'message': "Failed to load Instagram login page."}), 500
+
+            # Step 2: Check for 2FA
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, 'verificationCode'))
+                )
+                logging.info(f"2FA code input detected for {username} (user_id {user_id})")
+                session['verification_pending'] = {
+                    'username': username,
+                    'password': password,
+                    'proxy_settings': proxy_settings,
+                    'session_file': session_file,
+                    'user_id': user_id,
+                    'credits': credits,
+                    'credits_needed': credits_needed,
+                    'selenium_session': {
+                        'session_id': driver.session_id,
+                        'executor_url': driver.command_executor._url
+                    },
+                    'type': '2fa',
+                    'message': f"Two-factor authentication required for {username}. Please enter the 6-digit code sent to your phone or email.",
+                    'timeout': int(time.time()) + 180  # 3 minutes timeout
+                }
+                logging.info(f"2FA_PROMPT: Enter 2FA code (6 digits) for {username}")
+                return jsonify({
+                    'success': False,
+                    'verification_required': True,
+                    'message': session['verification_pending']['message'],
+                    'verification_type': '2fa',
+                    'username': username
+                }), 401
+            except TimeoutException:
+                logging.debug(f"No 2FA required for {username} at this stage")
+
+            # Step 3: Check for email verification challenge (e.g., verify_email)
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, 'securityCode'))
+                )
+                # Attempt to extract the email address from the page
+                email_element = None
                 try:
-                    if two_factor_code:
-                        cl.login(username, password, verification_code=two_factor_code)
-                        logging.info(f"Logged in with 2FA code for {username} (user_id {user_id})")
-                    else:
-                        cl.login(username, password)
-                        logging.info(f"Logged in without 2FA for {username} (user_id {user_id})")
+                    email_element = driver.find_element(By.XPATH, "//p[contains(text(), '@')]")
+                    email_text = email_element.text
+                except:
+                    email_text = "your email"
+                logging.info(f"Email verification challenge detected for {username} (user_id {user_id})")
+                session['verification_pending'] = {
+                    'username': username,
+                    'password': password,
+                    'proxy_settings': proxy_settings,
+                    'session_file': session_file,
+                    'user_id': user_id,
+                    'credits': credits,
+                    'credits_needed': credits_needed,
+                    'selenium_session': {
+                        'session_id': driver.session_id,
+                        'executor_url': driver.command_executor._url
+                    },
+                    'type': 'email_verification',
+                    'message': f"Instagram requires email verification for {username}. Please enter the 6-digit code sent to {email_text}.",
+                    'timeout': int(time.time()) + 180  # 3 minutes timeout
+                }
+                logging.info(f"EMAIL_VERIFICATION_PROMPT: Enter email verification code (6 digits) for {username}")
+                return jsonify({
+                    'success': False,
+                    'verification_required': True,
+                    'message': session['verification_pending']['message'],
+                    'verification_type': 'email_verification',
+                    'username': username
+                }), 401
+            except TimeoutException:
+                logging.debug(f"No email verification required for {username} at this stage")
+
+            # Step 4: Check if login was successful
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.url_contains('instagram.com')
+                )
+                if 'login' not in driver.current_url:
+                    logging.info(f"Login successful for {username} (user_id {user_id}) without additional verification")
+                    # Initialize instagrapi client to save session
+                    cl = Client(request_timeout=15, proxy=proxy_settings["proxy"] if proxy_settings else None)
+                    cl.login(username, password)  # Re-login to generate session file
                     cl.dump_settings(session_file)
-                    logging.info(f"Session saved to {session_file}")
-                except ChallengeRequired as e:
-                    logging.error(f"Challenge required for {username} (user_id {user_id}): {str(e)}")
-                    flash("Instagram requires a challenge verification. Please try logging in manually on the Instagram app to resolve this.", "danger")
-                    return render_template('add_account.html', two_factor_required=False)
-                except TwoFactorRequired as e:
-                    logging.info(f"2FA required for {username} (user_id {user_id})")
-                    flash("Two-factor authentication required. Please enter the 2FA code.", "warning")
-                    return render_template('add_account.html', username=username, two_factor_required=True)
-                except ClientError as e:
-                    logging.error(f"Client error during login for {username} (user_id {user_id}): {str(e)}")
-                    flash(f"Login failed: {str(e)}. Please check your credentials or try again later.", "danger")
-                    return render_template('add_account.html', two_factor_required=False)
+                    driver.quit()
+                else:
+                    driver.quit()
+                    logging.error(f"Login failed for {username} (user_id {user_id}): Unknown challenge or error")
+                    return jsonify({
+                        'success': False,
+                        'message': "Instagram requires additional verification that cannot be automated. Please resolve manually on the Instagram app.",
+                        'username': username
+                    }), 401
+            except TimeoutException:
+                driver.quit()
+                logging.error(f"Login failed for {username} (user_id {user_id}): Unknown error")
+                return jsonify({'success': False, 'message': "Login failed: Unknown error."}), 400
+
+            # Update database and session
             new_credits = credits - credits_needed
             c.execute('UPDATE users SET credits = ? WHERE id = ?', (new_credits, user_id))
             c.execute('INSERT OR REPLACE INTO accounts (user_id, username, session_file, needs_reauth, has_sent_initial_dms, proxy_settings) VALUES (?, ?, ?, 0, 0, ?)',
@@ -579,14 +681,214 @@ def add_account():
             client_key = f"{user_id}_{username}"
             clients[client_key] = cl
             session['credits'] = new_credits
-            flash(f"Account '{username}' added successfully! {credits_needed} credits deducted. Remaining credits: {new_credits}", "success")
+            session.pop('verification_pending', None)
             logging.info(f"Account {username} added successfully for user_id {user_id}, credits deducted: {credits_needed}, proxy: {proxy_settings}")
-            return redirect(url_for('dashboard'))
+            return jsonify({'success': True, 'message': f"Account '{username}' added successfully! {credits_needed} credits deducted. Remaining credits: {new_credits}"})
+
         except Exception as e:
-            flash(f"Unexpected error during login: {str(e)}", "danger")
+            if 'driver' in locals():
+                driver.quit()
             logging.error(f"Unexpected login error for {username}: {str(e)}")
-            return render_template('add_account.html', two_factor_required=False)
-    return render_template('add_account.html', two_factor_required=False)
+            return jsonify({'success': False, 'message': f"Unexpected error during login: {str(e)}"}), 500
+
+    return render_template('add_account.html')
+
+@app.route('/verify-code', methods=['POST'])
+@login_required
+def verify_code():
+    user_id = session.get('user_id')
+    verification_code = request.form.get('verification_code')
+
+    if not verification_code:
+        return jsonify({'success': False, 'message': "Verification code is required."}), 400
+
+    if 'verification_pending' not in session:
+        return jsonify({'success': False, 'message': "No pending verification found."}), 400
+
+    pending = session['verification_pending']
+    username = pending['username']
+    proxy_settings = pending['proxy_settings']
+    session_file = pending['session_file']
+    credits = pending['credits']
+    credits_needed = pending['credits_needed']
+    selenium_session = pending['selenium_session']
+    verification_type = pending['type']
+
+    # Check for timeout
+    current_time = int(time.time())
+    if current_time > pending['timeout']:
+        try:
+            options = Options()
+            driver = webdriver.Remote(
+                command_executor=selenium_session['executor_url'],
+                options=options
+            )
+            driver.session_id = selenium_session['session_id']
+            driver.quit()
+        except:
+            pass
+        session.pop('verification_pending', None)
+        logging.error(f"Verification timeout for {username} (user_id {user_id})")
+        return jsonify({'success': False, 'message': "Verification timed out. Please try adding the account again."}), 408
+
+    try:
+        # Reattach to Selenium session
+        options = Options()
+        driver = webdriver.Remote(
+            command_executor=selenium_session['executor_url'],
+            options=options
+        )
+        driver.session_id = selenium_session['session_id']
+        
+        # Enter the verification code based on type
+        if verification_type == '2fa':
+            try:
+                code_input = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.NAME, 'verificationCode'))
+                )
+                code_input.clear()
+                code_input.send_keys(verification_code)
+                driver.find_element(By.XPATH, '//button[@type="submit"]').click()
+                logging.info(f"Submitted 2FA code for {username} (user_id {user_id})")
+            except TimeoutException:
+                driver.quit()
+                logging.error(f"2FA code input not found for {username} (user_id {user_id})")
+                return jsonify({'success': False, 'message': "Failed to submit 2FA code: Input field not found."}), 400
+        elif verification_type == 'email_verification':
+            try:
+                code_input = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.NAME, 'securityCode'))
+                )
+                code_input.clear()
+                code_input.send_keys(verification_code)
+                driver.find_element(By.XPATH, '//button[@type="submit"]').click()
+                logging.info(f"Submitted email verification code for {username} (user_id {user_id})")
+            except TimeoutException:
+                driver.quit()
+                logging.error(f"Email verification code input not found for {username} (user_id {user_id})")
+                return jsonify({'success': False, 'message': "Failed to submit email verification code: Input field not found."}), 400
+
+        # Check for additional verification steps (e.g., 2FA after email verification)
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.NAME, 'verificationCode'))
+            )
+            logging.info(f"2FA code input detected after email verification for {username} (user_id {user_id})")
+            session['verification_pending'] = {
+                'username': username,
+                'password': pending['password'],
+                'proxy_settings': proxy_settings,
+                'session_file': session_file,
+                'user_id': user_id,
+                'credits': credits,
+                'credits_needed': credits_needed,
+                'selenium_session': {
+                    'session_id': driver.session_id,
+                    'executor_url': driver.command_executor._url
+                },
+                'type': '2fa',
+                'message': f"Two-factor authentication required for {username}. Please enter the 6-digit code sent to your phone or email.",
+                'timeout': int(time.time()) + 180  # 3 minutes timeout
+            }
+            logging.info(f"2FA_PROMPT: Enter 2FA code (6 digits) for {username} after email verification")
+            return jsonify({
+                'success': False,
+                'verification_required': True,
+                'message': session['verification_pending']['message'],
+                'verification_type': '2fa',
+                'username': username
+            }), 401
+        except TimeoutException:
+            logging.debug(f"No additional 2FA required for {username} after email verification")
+
+        # Verify login success
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.url_contains('instagram.com')
+            )
+            if 'login' not in driver.current_url:
+                logging.info(f"Verification successful for {username} (user_id {user_id})")
+                # Initialize instagrapi client
+                cl = Client(request_timeout=15, proxy=proxy_settings["proxy"] if proxy_settings else None)
+                cl.login(username, pending['password'])  # Re-login to generate session file
+                cl.dump_settings(session_file)
+                driver.quit()
+            else:
+                driver.quit()
+                logging.error(f"Verification failed for {username} (user_id {user_id}): Invalid code or additional challenge")
+                return jsonify({'success': False, 'message': "Invalid verification code or additional challenge required."}), 400
+        except TimeoutException:
+            driver.quit()
+            logging.error(f"Verification failed for {username} (user_id {user_id}): Login not completed")
+            return jsonify({'success': False, 'message': "Verification failed: Login not completed."}), 400
+
+        # Update database and session
+        conn = db_pool
+        c = conn.cursor()
+        new_credits = credits - credits_needed
+        c.execute('UPDATE users SET credits = ? WHERE id = ?', (new_credits, user_id))
+        c.execute('INSERT OR REPLACE INTO accounts (user_id, username, session_file, needs_reauth, has_sent_initial_dms, proxy_settings) VALUES (?, ?, ?, 0, 0, ?)',
+                 (user_id, username, session_file, json.dumps(proxy_settings) if proxy_settings else None))
+        conn.commit()
+
+        client_key = f"{user_id}_{username}"
+        clients[client_key] = cl
+        session['credits'] = new_credits
+        session.pop('verification_pending', None)
+
+        logging.info(f"Account {username} added successfully for user_id {user_id}, credits deducted: {credits_needed}, proxy: {proxy_settings}")
+        return jsonify({'success': True, 'message': f"Account '{username}' added successfully! {credits_needed} credits deducted. Remaining credits: {new_credits}"})
+
+    except Exception as e:
+        if 'driver' in locals():
+            driver.quit()
+        logging.error(f"Unexpected error during verification for {username}: {str(e)}")
+        return jsonify({'success': False, 'message': f"Unexpected error: {str(e)}"}), 500
+
+@app.route('/check-verification-status', methods=['GET'])
+@login_required
+def check_verification_status():
+    logging.debug(f"Checking verification status for session: {session}")
+    if 'verification_pending' in session:
+        pending = session['verification_pending']
+        current_time = int(time.time())
+        if current_time > pending['timeout']:
+            try:
+                options = Options()
+                driver = webdriver.Remote(
+                    command_executor=pending['selenium_session']['executor_url'],
+                    options=options
+                )
+                driver.session_id = pending['selenium_session']['session_id']
+                driver.quit()
+            except:
+                pass
+            session.pop('verification_pending', None)
+            logging.error(f"Verification timeout for {pending['username']} (user_id {session.get('user_id')})")
+            return jsonify({
+                'needs_verification': True,
+                'timeout': True,
+                'message': "Verification timed out. Please try adding the account again.",
+                'username': pending['username']
+            })
+        logging.info(f"Verification pending for user_id {session.get('user_id')}: {pending}")
+        return jsonify({
+            'needs_verification': True,
+            'type': pending['type'],
+            'message': pending['message'],
+            'username': pending['username']
+        })
+    logging.debug(f"No verification pending for user_id {session.get('user_id')}")
+    return jsonify({'needs_verification': False})
+
+@app.route('/get-logs', methods=['GET'])
+@login_required
+def get_logs():
+    log_entries = []
+    if os.path.exists('crm.log'):
+        with open('crm.log', 'r', encoding='utf-8') as log_file:
+            log_entries = log_file.readlines()[-20:]  # Last 20 lines
+    return jsonify({'logs': log_entries})
 
 @app.route('/dashboard', defaults={'selected_account': None})
 @app.route('/dashboard/<selected_account>')
@@ -622,7 +924,7 @@ def send_dms():
         usernames_file = request.files.get('usernames')
         messages_file = request.files.get('messages')
         num_messages = request.form.get('num_messages', '1')
-        try :
+        try:
             num_messages = max(1, min(10, int(num_messages)))
         except ValueError:
             num_messages = 1
