@@ -5,11 +5,37 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Add Instagram Account</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        #log-container {
+            max-height: 300px;
+            overflow-y: auto;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        #submit-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .modal-content {
+            border: 2px solid #ffeb3b;
+        }
+        .alert-dismissible .btn-close {
+            padding: 0.5rem;
+        }
+        #timer {
+            font-weight: bold;
+            color: #dc3545;
+        }
+    </style>
 </head>
 <body>
     <div class="container mt-5">
         <div class="row justify-content-center">
-            <div class="col-md-6 col-lg-4">
+            <div class="col-md-8 col-lg-6">
                 <!-- Flash Messages -->
                 {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
@@ -22,14 +48,23 @@
                 {% endif %}
                 {% endwith %}
 
+                <!-- Dynamic Message Container -->
+                <div id="message-container"></div>
+
+                <!-- Log Display -->
+                <div class="mb-4">
+                    <h5>Recent Logs</h5>
+                    <div id="log-container"></div>
+                </div>
+
                 <!-- Add Account Form -->
                 <div class="card shadow-sm">
                     <div class="card-body">
                         <h2 class="card-title text-center mb-4">Add Instagram Account</h2>
-                        <form method="POST" action="{{ url_for('add_account') }}">
+                        <form id="add-account-form" method="POST">
                             <div class="mb-3">
                                 <label for="username" class="form-label">Instagram Username</label>
-                                <input type="text" class="form-control" id="username" name="username" value="{{ username if username else '' }}" required>
+                                <input type="text" class="form-control" id="username" name="username" required>
                             </div>
                             <div class="mb-3">
                                 <label for="password" class="form-label">Instagram Password</label>
@@ -55,13 +90,7 @@
                                     <input type="password" class="form-control" id="proxy_password" name="proxy_password" placeholder="Optional">
                                 </div>
                             </div>
-                            {% if two_factor_required %}
-                            <div class="mb-3">
-                                <label for="two_factor_code" class="form-label">2FA Code</label>
-                                <input type="text" class="form-control" id="two_factor_code" name="two_factor_code" required>
-                            </div>
-                            {% endif %}
-                            <button type="submit" class="btn btn-primary w-100">Add Account</button>
+                            <button type="submit" class="btn btn-primary w-100" id="submit-btn">Add Account</button>
                         </form>
                         <div class="mt-3 text-center">
                             <a href="{{ url_for('dashboard') }}">Back to Dashboard</a>
@@ -72,6 +101,292 @@
         </div>
     </div>
 
+    <!-- Verification Modal -->
+    <div class="modal fade" id="verificationModal" tabindex="-1" aria-labelledby="verificationModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="verificationModalLabel">Verification Required</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="verification-message"></p>
+                    <p>Time remaining: <span id="timer">3:00</span></p>
+                    <div class="mb-3">
+                        <label for="modal-verification-code" class="form-label">Verification Code (6 digits)</label>
+                        <input type="text" class="form-control" id="modal-verification-code" placeholder="Enter 6-digit code" pattern="\d{6}" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" id="modal-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="modal-submit-code">Submit Code</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const logContainer = document.getElementById('log-container');
+        const messageContainer = document.getElementById('message-container');
+        const submitBtn = document.getElementById('submit-btn');
+        const form = document.getElementById('add-account-form');
+        const verificationModal = new bootstrap.Modal(document.getElementById('verificationModal'), { backdrop: 'static', keyboard: false });
+        const verificationMessage = document.getElementById('verification-message');
+        const modalVerificationCode = document.getElementById('modal-verification-code');
+        const modalSubmitCode = document.getElementById('modal-submit-code');
+        const modalCancel = document.getElementById('modal-cancel');
+        const timerElement = document.getElementById('timer');
+        let lastLogCount = 0;
+        let isVerificationRequired = false;
+        let verificationType = null;
+        let verificationUsername = null;
+        let timerInterval = null;
+
+        // Function to escape HTML to prevent injection
+        function escapeHTML(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Function to show an alert
+        function showAlert(message, type = 'danger') {
+            console.log(`Showing alert: ${message}, type: ${type}`);
+            messageContainer.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show" role="alert">
+                ${escapeHTML(message)}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>`;
+        }
+
+        // Function to format time for the timer
+        function formatTime(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${minutes}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+
+        // Function to start the timer
+        function startTimer(duration) {
+            let timeLeft = duration;
+            timerElement.textContent = formatTime(timeLeft);
+            timerInterval = setInterval(() => {
+                timeLeft--;
+                timerElement.textContent = formatTime(timeLeft);
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    verificationModal.hide();
+                    showAlert('Verification timed out. Please try adding the account again.', 'danger');
+                    submitBtn.textContent = 'Add Account';
+                    submitBtn.classList.remove('btn-warning');
+                    submitBtn.classList.add('btn-primary');
+                    submitBtn.disabled = false;
+                    isVerificationRequired = false;
+                    verificationType = null;
+                    verificationUsername = null;
+                    modalVerificationCode.value = '';
+                }
+            }, 1000);
+        }
+
+        // Function to stop the timer
+        function stopTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+        }
+
+        // Function to show the verification modal
+        function showVerificationModal(message, type, username) {
+            console.log(`Showing verification modal: ${message}, type: ${type}, username: ${username}`);
+            verificationMessage.textContent = message;
+            modalVerificationCode.value = '';
+            verificationType = type;
+            verificationUsername = username;
+            verificationModal.show();
+            submitBtn.textContent = type === '2fa' ? 'Awaiting 2FA Code' : 'Awaiting Email Verification Code';
+            submitBtn.classList.remove('btn-primary');
+            submitBtn.classList.add('btn-warning');
+            submitBtn.disabled = true;
+            isVerificationRequired = true;
+            startTimer(180); // 3 minutes
+        }
+
+        // Function to hide the verification modal
+        function hideVerificationModal() {
+            console.log('Hiding verification modal');
+            stopTimer();
+            verificationModal.hide();
+            submitBtn.textContent = 'Add Account';
+            submitBtn.classList.remove('btn-warning');
+            submitBtn.classList.add('btn-primary');
+            submitBtn.disabled = false;
+            isVerificationRequired = false;
+            verificationType = null;
+            verificationUsername = null;
+            modalVerificationCode.value = '';
+        }
+
+        // Fetch logs periodically
+        async function fetchLogs() {
+            try {
+                const response = await fetch('{{ url_for('get_logs') }}');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                const logs = data.logs || [];
+                if (logs.length !== lastLogCount) {
+                    logContainer.innerHTML = logs.map(log => `<div>${escapeHTML(log)}</div>`).join('');
+                    lastLogCount = logs.length;
+                    logContainer.scrollTop = logContainer.scrollHeight;
+                }
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+                showAlert('Failed to fetch logs. Please try again.', 'danger');
+            }
+        }
+
+        // Poll logs and verification status
+        async function pollVerificationStatus() {
+            try {
+                const response = await fetch('{{ url_for('check_verification_status') }}');
+                const data = await response.json();
+                if (data.needs_verification && !isVerificationRequired) {
+                    if (data.timeout) {
+                        showAlert(data.message, 'danger');
+                    } else {
+                        showVerificationModal(data.message, data.type, data.username);
+                    }
+                } else if (!data.needs_verification && isVerificationRequired) {
+                    hideVerificationModal();
+                }
+            } catch (error) {
+                console.error('Error checking verification status:', error);
+            }
+        }
+
+        setInterval(fetchLogs, 2000);
+        setInterval(pollVerificationStatus, 2000);
+        fetchLogs();
+        pollVerificationStatus();
+
+        // Form submission
+        form.addEventListener('submit', async function (event) {
+            event.preventDefault();
+            if (isVerificationRequired) {
+                showAlert('Please complete the verification process.', 'warning');
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Processing...';
+
+            try {
+                const formData = new FormData(form);
+                const response = await fetch('{{ url_for('add_account') }}', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                console.log('Add account response status:', response.status, response.statusText);
+                const data = await response.json();
+                console.log('Add account response data:', data);
+
+                if (data.success) {
+                    showAlert(data.message || 'Account added successfully.', 'success');
+                    form.reset();
+                    setTimeout(() => {
+                        window.location.href = '{{ url_for('dashboard') }}';
+                    }, 2000);
+                } else if (data.verification_required) {
+                    showVerificationModal(
+                        data.message,
+                        data.verification_type,
+                        data.username
+                    );
+                } else {
+                    showAlert(data.message || 'Failed to add account.', 'danger');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Add Account';
+                }
+            } catch (error) {
+                console.error('Form submission error:', error);
+                showAlert('An unexpected error occurred. Please try again.', 'danger');
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Add Account';
+            }
+        });
+
+        // Modal Submit Code
+        modalSubmitCode.addEventListener('click', async function () {
+            const code = modalVerificationCode.value.trim();
+            if (!/^\d{6}$/.test(code)) {
+                showAlert('Please enter a valid 6-digit code.', 'danger');
+                return;
+            }
+
+            modalSubmitCode.disabled = true;
+            modalSubmitCode.textContent = 'Submitting...';
+
+            try {
+                const formData = new FormData();
+                formData.append('verification_code', code);
+                const response = await fetch('{{ url_for('verify_code') }}', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                console.log('Verify code response status:', response.status, response.statusText);
+                const data = await response.json();
+                console.log('Verify code response data:', data);
+
+                if (data.success) {
+                    showAlert(data.message || 'Verification successful.', 'success');
+                    hideVerificationModal();
+                    form.reset();
+                    setTimeout(() => {
+                        window.location.href = '{{ url_for('dashboard') }}';
+                    }, 2000);
+                } else if (data.verification_required) {
+                    // Handle additional verification steps (e.g., 2FA after email verification)
+                    hideVerificationModal();
+                    showVerificationModal(
+                        data.message,
+                        data.verification_type,
+                        data.username
+                    );
+                } else {
+                    showAlert(data.message || 'Invalid verification code.', 'danger');
+                    modalSubmitCode.disabled = false;
+                    modalSubmitCode.textContent = 'Submit Code';
+                }
+            } catch (error) {
+                console.error('Code submission error:', error);
+                showAlert('An error occurred while verifying the code. Please try again.', 'danger');
+                modalSubmitCode.disabled = false;
+                modalSubmitCode.textContent = 'Submit Code';
+            }
+        });
+
+        // Modal Cancel
+        modalCancel.addEventListener('click', async function () {
+            try {
+                hideVerificationModal();
+                showAlert('Verification cancelled. You can try adding the account again.', 'info');
+                form.reset();
+            } catch (error) {
+                console.error('Cancel error:', error);
+                showAlert('Error cancelling verification.', 'danger');
+            }
+        });
+
+        // Prevent modal close without action
+        verificationModal._element.addEventListener('hide.bs.modal', function (event) {
+            if (isVerificationRequired && !modalCancel.clicked && timerInterval) {
+                event.preventDefault();
+                showAlert('Please submit the verification code or cancel.', 'warning');
+            }
+        });
+    </script>
 </body>
 </html>
